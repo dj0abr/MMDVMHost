@@ -112,6 +112,11 @@ void CDStarHeader::getRPTCall1(unsigned char* call1) const
 	assert(call1 != nullptr);
 
 	::memcpy(call1, m_header + 11U, DSTAR_LONG_CALLSIGN_LENGTH);
+
+	if(!strcmp(call1,"DIRECT")) {
+		unsigned char mc[20];
+		sprintf(call1,"%s B",getMyCall1(mc));
+	}
 }
 
 void CDStarHeader::getRPTCall2(unsigned char* call2) const
@@ -119,6 +124,11 @@ void CDStarHeader::getRPTCall2(unsigned char* call2) const
 	assert(call2 != nullptr);
 
 	::memcpy(call2, m_header + 3U, DSTAR_LONG_CALLSIGN_LENGTH);
+
+	if(!strcmp(call2,"DIRECT")) {
+		unsigned char mc[20];
+		sprintf(call2,"%s G",getMyCall1(mc));
+	}
 }
 
 void CDStarHeader::setRPTCall1(const unsigned char* call1)
