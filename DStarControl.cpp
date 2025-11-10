@@ -1,5 +1,6 @@
 /*
  *	Copyright (C) 2015-2019,2021,2023,2025 Jonathan Naylor, G4KLX
+ *  D-Star Simplex Header addon by Kurt Moraw, DJ0ABR 2025
  *
  *	This program is free software; you can redistribute it and/or modify
  *	it under the terms of the GNU General Public License as published by
@@ -14,6 +15,7 @@
 #include "DStarControl.h"
 #include "Utils.h"
 #include "Sync.h"
+#include "DStarDefines.h"
 #include "Log.h"
 #include "SMeter.h"
 
@@ -120,6 +122,25 @@ CDStarControl::~CDStarControl()
 	delete[] m_lastFrame;
 }
 
+// --- Simplex/DIRECT Helpers --------------------------------------------------
+// Prüft, ob ein 8-Byte Callsign-Feld exakt "DIRECT  " ist (mit Spaces aufgefüllt).
+static inline bool isDirectField(const unsigned char* cs)
+{
+	static const unsigned char DIRECT8[DSTAR_LONG_CALLSIGN_LENGTH] =
+		{ 'D','I','R','E','C','T',' ',' ' };
+	return ::memcmp(cs, DIRECT8, DSTAR_LONG_CALLSIGN_LENGTH) == 0;
+}
+
+// Simplex/DIRECT nach Spezifikation: Repeaterbit = 0 UND mind. eines der RPT-Felder "DIRECT  ".
+static inline bool isSimplexHeader(const CDStarHeader& h)
+{
+	unsigned char r1[DSTAR_LONG_CALLSIGN_LENGTH];
+	unsigned char r2[DSTAR_LONG_CALLSIGN_LENGTH];
+	h.getRPTCall1(r1);
+	h.getRPTCall2(r2);
+	return (!h.isRepeater()) && (isDirectField(r1) || isDirectField(r2));
+}
+
 bool CDStarControl::writeModem(unsigned char *data, unsigned int len)
 {
 	assert(data != nullptr);
@@ -218,8 +239,16 @@ bool CDStarControl::writeModem(unsigned char *data, unsigned int len)
 		header.getMyCall1(my1);
 
 		// Is this a transmission destined for a repeater?
-		if (!header.isRepeater()) {
+		/*if (!header.isRepeater()) {
 			LogMessage("D-Star, non repeater RF header received from %8.8s", my1);
+			m_rfState = RPT_RF_STATE::INVALID;
+			return true;
+		}*/
+
+		// Simplex/DIRECT erlauben, aber nur wenn es ein gültiger DIRECT-Header ist
+		const bool simplex = isSimplexHeader(header);
+		if (!header.isRepeater() && !simplex) {
+			LogMessage("D-Star, unsupported non-repeater RF header from %8.8s", my1);
 			m_rfState = RPT_RF_STATE::INVALID;
 			return true;
 		}
@@ -228,10 +257,19 @@ bool CDStarControl::writeModem(unsigned char *data, unsigned int len)
 		header.getRPTCall1(callsign);
 
 		// Is it for us?
-		if (::memcmp(callsign, m_callsign, DSTAR_LONG_CALLSIGN_LENGTH) != 0) {
+		/*if (::memcmp(callsign, m_callsign, DSTAR_LONG_CALLSIGN_LENGTH) != 0) {
 			LogMessage("D-Star, received RF header for wrong repeater (%8.8s) from %8.8s", callsign, my1);
 			m_rfState = RPT_RF_STATE::INVALID;
 			return true;
+		}*/
+
+		// "Ist es für uns?" nur im Repeater-Fall prüfen (bei Simplex gibt es keinen Ziel-Repeater)
+		if (!simplex) {
+			if (::memcmp(callsign, m_callsign, DSTAR_LONG_CALLSIGN_LENGTH) != 0) {
+				LogMessage("D-Star, received RF header for wrong repeater (%8.8s) from %8.8s", callsign, my1);
+				m_rfState = RPT_RF_STATE::INVALID;
+				return true;
+			}
 		}
 
 		if (m_selfOnly && ::memcmp(my1, m_callsign, DSTAR_LONG_CALLSIGN_LENGTH - 1U) != 0 && !(std::find_if(m_whiteList.begin(), m_whiteList.end(), std::bind(CallsignCompare, std::placeholders::_1, my1)) != m_whiteList.end())) {
@@ -255,7 +293,9 @@ bool CDStarControl::writeModem(unsigned char *data, unsigned int len)
 		unsigned char your[DSTAR_LONG_CALLSIGN_LENGTH];
 		header.getYourCall(your);
 
-		m_net = ::memcmp(gateway, m_gateway, DSTAR_LONG_CALLSIGN_LENGTH) == 0;
+		//m_net = ::memcmp(gateway, m_gateway, DSTAR_LONG_CALLSIGN_LENGTH) == 0;
+		// Bridging: bei Simplex immer ins Netz; sonst wie bisher (RPT2 == m_gateway)
+		m_net = simplex || (::memcmp(gateway, m_gateway, DSTAR_LONG_CALLSIGN_LENGTH) == 0);
 
 		// Only start the timeout if not already running
 		if (!m_rfTimeoutTimer.isRunning())
@@ -287,7 +327,7 @@ bool CDStarControl::writeModem(unsigned char *data, unsigned int len)
 			writeQueueHeaderRF(data);
 		}
 
-		if (m_net) {
+		/*if (m_net) {
 			// Modify the header
 			header.setRepeater(false);
 			header.setRPTCall1(m_callsign);
@@ -295,14 +335,29 @@ bool CDStarControl::writeModem(unsigned char *data, unsigned int len)
 			header.get(data + 1U);
 
 			writeNetworkHeaderRF(data);
+		}*/
+		if (m_net) {
+			// Fürs Netz IMMER Hotspot-RPTs setzen (auch wenn das RF-Header DIRECT war)
+			CDStarHeader netHdr(header);
+			netHdr.setRepeater(false);          // terminal header ins Netz
+			netHdr.setRPTCall1(m_callsign);     // RPT1 = Hotspot
+			netHdr.setRPTCall2(m_gateway);      // RPT2 = Hotspot-Gateway (...G)
+			netHdr.get(data + 1U);
+			writeNetworkHeaderRF(data);
 		}
 
 		m_rfState = RPT_RF_STATE::AUDIO;
 
-		if (m_netState == RPT_NET_STATE::IDLE) {
+		/*if (m_netState == RPT_NET_STATE::IDLE) {
 			m_display->writeDStar((char*)my1, (char*)my2, (char*)your, "R", "        ");
 			m_display->writeDStarRSSI(m_rssi);
-		}
+		}*/
+		if (m_netState == RPT_NET_STATE::IDLE) {
+			// Optional: Simplex sichtbar machen ("D" statt "R")
+			const char* path = simplex ? "D" : "R";
+			m_display->writeDStar((char*)my1, (char*)my2, (char*)your, path, "        ");
+ 			m_display->writeDStarRSSI(m_rssi);
+ 		}
 
 		LogMessage("D-Star, received RF header from %8.8s/%4.4s to %8.8s", my1, my2, your);
 	} else if (type == TAG_EOT) {
@@ -459,8 +514,15 @@ bool CDStarControl::writeModem(unsigned char *data, unsigned int len)
 			m_rfHeader.getMyCall1(my1);
 
 			// Is this a transmission destined for a repeater?
-			if (!m_rfHeader.isRepeater()) {
+			/*if (!m_rfHeader.isRepeater()) {
 				LogMessage("D-Star, non repeater RF header received from %8.8s", my1);
+				m_rfState = RPT_RF_STATE::INVALID;
+				return true;
+			}*/
+			// Simplex/DIRECT erlauben, aber nur wenn gültiger DIRECT-Header
+			const bool simplex = isSimplexHeader(m_rfHeader);
+			if (!m_rfHeader.isRepeater() && !simplex) {
+				LogMessage("D-Star, unsupported non-repeater RF header received from %8.8s", my1);
 				m_rfState = RPT_RF_STATE::INVALID;
 				return true;
 			}
@@ -469,10 +531,18 @@ bool CDStarControl::writeModem(unsigned char *data, unsigned int len)
 			m_rfHeader.getRPTCall1(callsign);
 
 			// Is it for us?
-			if (::memcmp(callsign, m_callsign, DSTAR_LONG_CALLSIGN_LENGTH) != 0) {
+			/*if (::memcmp(callsign, m_callsign, DSTAR_LONG_CALLSIGN_LENGTH) != 0) {
 				LogMessage("D-Star, received RF header for wrong repeater (%8.8s) from %8.8s", callsign, my1);
 				m_rfState = RPT_RF_STATE::INVALID;
 				return true;
+			}*/
+			// "Ist es für uns?" nur im Repeater-Fall prüfen
+			if (!simplex) {
+				if (::memcmp(callsign, m_callsign, DSTAR_LONG_CALLSIGN_LENGTH) != 0) {
+					LogMessage("D-Star, received RF header for wrong repeater (%8.8s) from %8.8s", callsign, my1);
+					m_rfState = RPT_RF_STATE::INVALID;
+					return true;
+				}
 			}
 
 			if (m_selfOnly && ::memcmp(my1, m_callsign, DSTAR_LONG_CALLSIGN_LENGTH - 1U) != 0 && !(std::find_if(m_whiteList.begin(), m_whiteList.end(), std::bind(CallsignCompare, std::placeholders::_1, my1)) != m_whiteList.end())) {
@@ -496,7 +566,9 @@ bool CDStarControl::writeModem(unsigned char *data, unsigned int len)
 			unsigned char your[DSTAR_LONG_CALLSIGN_LENGTH];
 			m_rfHeader.getYourCall(your);
 
-			m_net = ::memcmp(gateway, m_gateway, DSTAR_LONG_CALLSIGN_LENGTH) == 0;
+			//m_net = ::memcmp(gateway, m_gateway, DSTAR_LONG_CALLSIGN_LENGTH) == 0;
+			// Bridging: bei Simplex immer ins Netz; sonst wie bisher
+			m_net = simplex || (::memcmp(gateway, m_gateway, DSTAR_LONG_CALLSIGN_LENGTH) == 0);
 
 			// Only reset the timeout if the timeout is not running
 			if (!m_rfTimeoutTimer.isRunning())
@@ -521,14 +593,22 @@ bool CDStarControl::writeModem(unsigned char *data, unsigned int len)
 				unsigned char start[DSTAR_HEADER_LENGTH_BYTES + 1U];
 				start[0U] = TAG_HEADER;
 
-				// Modify the header
+				/* // Modify the header
 				CDStarHeader header(m_rfHeader);
 				header.setRepeater(false);
 				header.setRPTCall1(m_callsign);
 				header.setRPTCall2(m_callsign);
 				header.get(start + 1U);
 
-				writeQueueHeaderRF(start);
+				writeQueueHeaderRF(start);*/
+				// Netzwerk-Header IMMER mit Hotspot-RPTs füllen (auch bei Simplex)
+				CDStarHeader netHdr(m_rfHeader);
+				netHdr.setRepeater(false);
+				netHdr.setRPTCall1(m_callsign);
+				netHdr.setRPTCall2(m_gateway);
+				netHdr.get(start + 1U);
+
+				writeNetworkHeaderRF(start);
 			}
 
 			if (m_net) {
@@ -566,11 +646,18 @@ bool CDStarControl::writeModem(unsigned char *data, unsigned int len)
 
 			m_rfState = RPT_RF_STATE::AUDIO;
 
-			if (m_netState == RPT_NET_STATE::IDLE) {
+			/*if (m_netState == RPT_NET_STATE::IDLE) {
 				m_display->writeDStar((char*)my1, (char*)my2, (char*)your, "R", "        ");
 				m_display->writeDStarRSSI(m_rssi);
 				m_display->writeDStarBER(float(errors) / 0.48F);
-			}
+			}*/
+			if (m_netState == RPT_NET_STATE::IDLE) {
+				const bool simplex_for_display = isSimplexHeader(m_rfHeader);
+				const char* path = simplex_for_display ? "D" : "R";
+				m_display->writeDStar((char*)my1, (char*)my2, (char*)your, path, "        ");
+ 				m_display->writeDStarRSSI(m_rssi);
+ 				m_display->writeDStarBER(float(errors) / 0.48F);
+ 			}
 
 			LogMessage("D-Star, received RF late entry from %8.8s/%4.4s to %8.8s", my1, my2, your);
 
