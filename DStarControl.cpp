@@ -218,11 +218,11 @@ bool CDStarControl::writeModem(unsigned char *data, unsigned int len)
 		header.getMyCall1(my1);
 
 		// Is this a transmission destined for a repeater?
-		/*if (!header.isRepeater()) {
+		if (!header.isRepeater()) {
 			LogMessage("D-Star, non repeater RF header received from %8.8s", my1);
 			m_rfState = RPT_RF_STATE::INVALID;
 			return true;
-		}*/
+		}
 
 		unsigned char callsign[DSTAR_LONG_CALLSIGN_LENGTH];
 		header.getRPTCall1(callsign);
@@ -459,11 +459,11 @@ bool CDStarControl::writeModem(unsigned char *data, unsigned int len)
 			m_rfHeader.getMyCall1(my1);
 
 			// Is this a transmission destined for a repeater?
-			/*if (!m_rfHeader.isRepeater()) {
+			if (!m_rfHeader.isRepeater()) {
 				LogMessage("D-Star, non repeater RF header received from %8.8s", my1);
 				m_rfState = RPT_RF_STATE::INVALID;
 				return true;
-			}*/
+			}
 
 			unsigned char callsign[DSTAR_LONG_CALLSIGN_LENGTH];
 			m_rfHeader.getRPTCall1(callsign);
